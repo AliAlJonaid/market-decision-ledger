@@ -54,7 +54,10 @@ def main() -> int:
     sale.add_argument("--price", required=True)
     sale.add_argument("--reason", required=True)
 
-    valuation = commands.add_parser("mark", help="Record a complete price snapshot.")
+    valuation = commands.add_parser(
+        "mark",
+        help="Record an aggregate valuation from a complete set of position prices.",
+    )
     valuation.add_argument("--prices", required=True, help='JSON object, e.g. {"ACME": 42.00}.')
     valuation.add_argument("--benchmark-close", help="Optional benchmark close.")
 
@@ -97,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

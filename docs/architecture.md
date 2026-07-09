@@ -35,9 +35,10 @@ Runtime state is kept outside committed examples:
 ```text
 runtime/
   state.json     current paper cash and positions
-  events.csv     immutable transaction record
-  history.csv    complete price-snapshot history
+  events.csv     append-only event log by application convention
+  history.csv    aggregate valuation history
 ```
 
-The committed `examples/` directory contains only fictional fixtures and documentation.
+State-changing commands use a local recovery journal. The journal is written before the event and state files; if either write is interrupted, the next ledger command replays the same event ID once and reconciles `events.csv` with `state.json` before continuing. This small reference implementation assumes a single writer and does not claim tamper evidence, immutable storage, or database-grade concurrent transactions.
 
+The committed `examples/` directory contains only fictional fixtures and documentation.

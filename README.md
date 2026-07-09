@@ -68,7 +68,7 @@ The system favors a documented **HOLD** when evidence is missing, stale, contrad
 
 ## My role and AI assistance
 
-I defined the paper-only boundary, governance model, role separation, evidence requirements, audit format, and safety constraints; I then reviewed and validated the AI-assisted implementation against those requirements.
+I defined the paper-only boundary, governance model, role separation, evidence requirements, audit format, and safety constraints; I then reviewed and validated the implementation against those requirements. OpenAI Codex assisted with implementation, testing, documentation, and iteration.
 
 This repository distinguishes deterministic code from procedural policy controls and does not present AI-assisted code as solely hand-written. See [Development and authorship](docs/ai-collaboration.md).
 

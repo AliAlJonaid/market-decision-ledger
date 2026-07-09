@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import ledger as ledger_module
 from ledger import LedgerError, buy, create_state, deposit, load_policy, mark, sell, status
 
 
@@ -78,6 +81,49 @@ class LedgerTestCase(unittest.TestCase):
         sell_result = sell(self.state_dir, "ACME", "all", "22", "synthetic exit")
         self.assertEqual(sell_result["cash"], "1020.00")
         self.assertEqual(status(self.state_dir)["positions"], {})
+
+    def test_recovery_journal_repairs_event_write_failure_once(self) -> None:
+        original_append = ledger_module._atomic_csv_append
+        failed = {"value": False}
+
+        def fail_first_event_write(path, fieldnames, row):
+            if path.name == "events.csv" and not failed["value"]:
+                failed["value"] = True
+                raise OSError("simulated event write failure")
+            return original_append(path, fieldnames, row)
+
+        with patch.object(ledger_module, "_atomic_csv_append", side_effect=fail_first_event_write):
+            with self.assertRaisesRegex(LedgerError, "rerun any ledger command"):
+                deposit(self.state_dir, "25", "2026-01-01")
+
+        recovered = status(self.state_dir)
+        self.assertEqual(recovered["cash"], "1025.00")
+        self.assertFalse((self.state_dir / ".pending-transaction.json").exists())
+        with (self.state_dir / "events.csv").open(newline="", encoding="utf-8") as handle:
+            events = list(csv.DictReader(handle))
+        self.assertEqual([event["action"] for event in events], ["DEPOSIT"])
+        self.assertTrue(events[0]["event_id"])
+
+    def test_recovery_journal_does_not_duplicate_an_already_written_event(self) -> None:
+        original_json_write = ledger_module._atomic_json_write
+        failed = {"value": False}
+
+        def fail_first_state_write(path, value):
+            if path.name == "state.json" and not failed["value"]:
+                failed["value"] = True
+                raise OSError("simulated state write failure")
+            return original_json_write(path, value)
+
+        with patch.object(ledger_module, "_atomic_json_write", side_effect=fail_first_state_write):
+            with self.assertRaisesRegex(LedgerError, "rerun any ledger command"):
+                deposit(self.state_dir, "25", "2026-01-01")
+
+        recovered = status(self.state_dir)
+        self.assertEqual(recovered["cash"], "1025.00")
+        with (self.state_dir / "events.csv").open(newline="", encoding="utf-8") as handle:
+            events = list(csv.DictReader(handle))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["action"], "DEPOSIT")
 
 
 if __name__ == "__main__":

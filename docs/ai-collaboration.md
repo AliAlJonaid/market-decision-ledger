@@ -8,7 +8,7 @@ I defined the project scope, paper-only boundary, multi-role governance model, e
 
 ## AI assistance
 
-AI tools assisted with implementation and iteration. The public repository separates deterministic code from prompt/policy controls and explicitly documents where the boundary remains procedural rather than enforced in code.
+OpenAI Codex assisted with implementation, testing, documentation, and iteration. The public repository separates deterministic code from prompt/policy controls and explicitly documents where the boundary remains procedural rather than enforced in code.
 
 ## What this demonstrates
 
@@ -17,4 +17,3 @@ AI tools assisted with implementation and iteration. The public repository separ
 - Honest framing of AI-assisted implementation.
 
 It does not claim that all code was manually authored by one person or that the prototype is a production trading system.
-

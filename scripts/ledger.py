@@ -6,10 +6,12 @@ Prices and decisions are supplied by the caller and recorded locally.
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import os
 import re
 import tempfile
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -24,6 +26,14 @@ MONEY_QUANTUM = Decimal("0.01")
 PRICE_QUANTUM = Decimal("0.0001")
 SHARE_QUANTUM = Decimal("0.000001")
 TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
+EVENT_FIELDS = [
+    "event_id", "timestamp", "action", "ticker", "shares", "price",
+    "value_usd", "cash_after", "reason",
+]
+HISTORY_FIELDS = [
+    "timestamp", "cash", "positions_value", "total_value",
+    "total_deposited", "benchmark_close",
+]
 
 
 def _decimal(value: Any, label: str) -> Decimal:
@@ -76,6 +86,7 @@ def _state_paths(state_dir: Path) -> dict[str, Path]:
         "state": state_dir / "state.json",
         "events": state_dir / "events.csv",
         "history": state_dir / "history.csv",
+        "pending": state_dir / ".pending-transaction.json",
     }
 
 
@@ -86,21 +97,118 @@ def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
     ) as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary_path = Path(handle.name)
     os.replace(temporary_path, path)
 
 
-def _append_csv(path: Path, fieldnames: list[str], row: dict[str, Any]) -> None:
+def _atomic_csv_append(path: Path, fieldnames: list[str], row: dict[str, Any]) -> None:
+    """Append one logical row by atomically replacing the complete CSV file.
+
+    This is intentionally optimized for a small reference ledger, not a large
+    event store. Rewriting the file avoids leaving a partially written row and
+    also migrates older files when a field is added.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not path.exists()
-    with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        if new_file:
-            writer.writeheader()
+    existing_rows: list[dict[str, Any]] = []
+    existing_fields: list[str] = []
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            existing_fields = list(reader.fieldnames or [])
+            existing_rows = list(reader)
+
+    merged_fields = existing_fields + [name for name in fieldnames if name not in existing_fields]
+    if not merged_fields:
+        merged_fields = list(fieldnames)
+
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}-", delete=False,
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=merged_fields, extrasaction="ignore")
+        writer.writeheader()
+        for existing in existing_rows:
+            writer.writerow(existing)
         writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary_path = Path(handle.name)
+    os.replace(temporary_path, path)
+
+
+def _event_exists(path: Path, event_id: str) -> bool:
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8") as handle:
+        return any(row.get("event_id") == event_id for row in csv.DictReader(handle))
+
+
+def _apply_pending_transaction(state_dir: Path, transaction: dict[str, Any]) -> None:
+    paths = _state_paths(state_dir)
+    event = transaction.get("event")
+    state_after = transaction.get("state_after")
+    if not isinstance(event, dict) or not isinstance(state_after, dict):
+        raise LedgerError("pending transaction journal is invalid")
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        raise LedgerError("pending transaction journal has no event id")
+
+    if not _event_exists(paths["events"], event_id):
+        _atomic_csv_append(paths["events"], EVENT_FIELDS, event)
+    _atomic_json_write(paths["state"], state_after)
+    try:
+        paths["pending"].unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _recover_pending(state_dir: Path) -> None:
+    pending = _state_paths(state_dir)["pending"]
+    if not pending.exists():
+        return
+    try:
+        with pending.open(encoding="utf-8") as handle:
+            transaction = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LedgerError("pending transaction journal cannot be read") from exc
+    _apply_pending_transaction(state_dir, transaction)
+
+
+def _commit_event_transaction(
+    state_dir: Path,
+    state_after: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    """Commit a state transition and its event through a recovery journal.
+
+    The durable journal is the commit point. If either output write is
+    interrupted, the next state load replays the same event idempotently and
+    writes the intended state before clearing the journal.
+    """
+    state_snapshot = copy.deepcopy(state_after)
+    state_snapshot["updated_at"] = _timestamp()
+    event_snapshot = dict(event)
+    event_snapshot["event_id"] = uuid.uuid4().hex
+    event_snapshot.setdefault("timestamp", _timestamp())
+    transaction = {
+        "schema_version": 1,
+        "event": event_snapshot,
+        "state_after": state_snapshot,
+    }
+    paths = _state_paths(state_dir)
+    _atomic_json_write(paths["pending"], transaction)
+    try:
+        _apply_pending_transaction(state_dir, transaction)
+    except OSError as exc:
+        raise LedgerError(
+            "transaction interrupted; rerun any ledger command to recover it"
+        ) from exc
 
 
 def _load_state(state_dir: Path) -> dict[str, Any]:
+    _recover_pending(state_dir)
     path = _state_paths(state_dir)["state"]
     if not path.exists():
         raise LedgerError("state does not exist; run init first")
@@ -116,11 +224,6 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
     if not isinstance(state["positions"], dict) or not isinstance(state["deposit_dates"], list):
         raise LedgerError("state file has an invalid structure")
     return state
-
-
-def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = _timestamp()
-    _atomic_json_write(_state_paths(state_dir)["state"], state)
 
 
 def _clean_ticker(ticker: str) -> str:
@@ -198,11 +301,9 @@ def deposit(state_dir: Path, amount: Any, on_date: str | None = None) -> dict[st
     state["cash"] = _number(cash)
     state["total_deposited"] = _number(total_deposited)
     state["deposit_dates"].append(deposit_date)
-    _save_state(state_dir, state)
-
-    _append_csv(
-        _state_paths(state_dir)["events"],
-        ["timestamp", "action", "ticker", "shares", "price", "value_usd", "cash_after", "reason"],
+    _commit_event_transaction(
+        state_dir,
+        state,
         {
             "timestamp": _timestamp(),
             "action": "DEPOSIT",
@@ -265,11 +366,9 @@ def buy(
     }
     cash_after = _money(cash - value)
     state["cash"] = _number(cash_after)
-    _save_state(state_dir, state)
-
-    _append_csv(
-        _state_paths(state_dir)["events"],
-        ["timestamp", "action", "ticker", "shares", "price", "value_usd", "cash_after", "reason"],
+    _commit_event_transaction(
+        state_dir,
+        state,
         {
             "timestamp": _timestamp(),
             "action": "BUY",
@@ -319,11 +418,9 @@ def sell(
 
     cash_after = _money(_decimal(state["cash"], "cash") + proceeds)
     state["cash"] = _number(cash_after)
-    _save_state(state_dir, state)
-
-    _append_csv(
-        _state_paths(state_dir)["events"],
-        ["timestamp", "action", "ticker", "shares", "price", "value_usd", "cash_after", "reason"],
+    _commit_event_transaction(
+        state_dir,
+        state,
         {
             "timestamp": _timestamp(),
             "action": "SELL",
@@ -362,9 +459,9 @@ def mark(state_dir: Path, prices: dict[str, Any], benchmark_close: Any | None = 
     total_value = _money(cash + positions_value)
     benchmark = "" if benchmark_close is None else _number(_price(_positive(benchmark_close, "benchmark_close")))
 
-    _append_csv(
+    _atomic_csv_append(
         _state_paths(state_dir)["history"],
-        ["timestamp", "cash", "positions_value", "total_value", "total_deposited", "benchmark_close"],
+        HISTORY_FIELDS,
         {
             "timestamp": _timestamp(),
             "cash": _number(cash),
@@ -385,4 +482,3 @@ def mark(state_dir: Path, prices: dict[str, Any], benchmark_close: Any | None = 
 
 def status(state_dir: Path) -> dict[str, Any]:
     return _load_state(state_dir)
-
