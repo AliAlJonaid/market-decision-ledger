@@ -1,0 +1,7 @@
+{
+  "allowed_tickers": ["ACME", "ORBIT"],
+  "minimum_confidence": 7,
+  "max_positions": 2,
+  "max_position_usd": 400
+}
+
