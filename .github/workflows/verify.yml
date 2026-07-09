@@ -1,0 +1,23 @@
+name: Verify
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  public-reference-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check public repository safety
+        run: bash scripts/check-public-safety.sh
+
+      - name: Run deterministic ledger tests
+        run: python -m unittest discover -s tests -v
+
